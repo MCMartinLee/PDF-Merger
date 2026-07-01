@@ -1,7 +1,6 @@
 const fileInput = document.querySelector("#fileInput");
 const dropZone = document.querySelector("#dropZone");
 const fileList = document.querySelector("#fileList");
-const addToEditorButton = document.querySelector("#addToEditorButton");
 const statusMessage = document.querySelector("#statusMessage");
 const previewMeta = document.querySelector("#previewMeta");
 const rotatePageButton = document.querySelector("#rotatePageButton");
@@ -14,6 +13,7 @@ const emptyPreview = document.querySelector("#emptyPreview");
 let stagedFiles = [];
 let editorPages = [];
 let renderToken = 0;
+let draggedPageIds = [];
 const pdfPreviewCache = new Map();
 
 if (window.pdfjsLib) {
@@ -56,7 +56,6 @@ function getSelectedPages() {
 
 function updateControls() {
   const hasSelection = getSelectedPages().length > 0;
-  addToEditorButton.disabled = stagedFiles.length === 0;
   rotatePageButton.disabled = !hasSelection;
   excludePageButton.disabled = !hasSelection;
   exportButton.disabled = editorPages.length === 0;
@@ -69,7 +68,7 @@ function updateStatus() {
   }
 
   const label = stagedFiles.length === 1 ? "1 PDF ready" : `${stagedFiles.length} PDFs ready`;
-  setStatus(`${label}. Add to editor when you want to append them.`);
+  setStatus(`${label}. Add a PDF row to append it to the editor.`);
 }
 
 function updatePreviewMeta() {
@@ -127,16 +126,12 @@ function renderFileList() {
     const actions = document.createElement("div");
     actions.className = "file-actions";
 
-    const upButton = createActionButton("^", "Move up", () => moveStagedFile(index, -1));
-    upButton.disabled = index === 0;
-
-    const downButton = createActionButton("v", "Move down", () => moveStagedFile(index, 1));
-    downButton.disabled = index === stagedFiles.length - 1;
+    const addButton = createActionButton("Add", "Add to editor", () => addPdfToEditor(entry));
 
     const removeButton = createActionButton("x", "Remove", () => removeStagedFile(index));
     removeButton.classList.add("remove");
 
-    actions.append(upButton, downButton, removeButton);
+    actions.append(addButton, removeButton);
     item.append(details, actions);
     fileList.append(item);
   });
@@ -159,18 +154,6 @@ function addFiles(files) {
   }
 }
 
-function moveStagedFile(index, direction) {
-  const newIndex = index + direction;
-
-  if (newIndex < 0 || newIndex >= stagedFiles.length) {
-    return;
-  }
-
-  const [file] = stagedFiles.splice(index, 1);
-  stagedFiles.splice(newIndex, 0, file);
-  renderFileList();
-}
-
 function removeStagedFile(index) {
   stagedFiles.splice(index, 1);
   renderFileList();
@@ -186,37 +169,33 @@ async function getPreviewPdf(entry) {
   return pdf;
 }
 
-async function addToEditor() {
-  if (stagedFiles.length === 0 || !window.pdfjsLib) {
+async function addPdfToEditor(entry) {
+  if (!entry || !window.pdfjsLib) {
     return;
   }
 
-  addToEditorButton.disabled = true;
-  setStatus("Adding PDFs to editor...");
+  setStatus(`Adding ${entry.file.name} to editor...`);
 
   try {
     const pagesToAppend = [];
+    const pdf = await getPreviewPdf(entry);
 
-    for (const entry of stagedFiles) {
-      const pdf = await getPreviewPdf(entry);
-
-      for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-        pagesToAppend.push({
-          id: makeId(),
-          source: entry,
-          sourcePageNumber: pageNumber,
-          rotation: 0,
-          selected: false,
-        });
-      }
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      pagesToAppend.push({
+        id: makeId(),
+        source: entry,
+        sourcePageNumber: pageNumber,
+        rotation: 0,
+        selected: false,
+      });
     }
 
     editorPages = [...editorPages, ...pagesToAppend];
-    setStatus(`${stagedFiles.length} PDFs appended to the editor.`);
+    setStatus(`${entry.file.name} appended to the editor.`);
     renderFileList();
     renderEditor();
   } catch (error) {
-    setStatus(error.message || "Could not add these PDFs to the editor.", true);
+    setStatus(error.message || "Could not add this PDF to the editor.", true);
     updateControls();
   }
 }
@@ -254,6 +233,43 @@ function updatePageSelection() {
   });
 }
 
+function getDragPageIds(pageId) {
+  const page = editorPages.find((item) => item.id === pageId);
+  if (!page) {
+    return [];
+  }
+
+  if (!page.selected) {
+    editorPages.forEach((item) => {
+      item.selected = item.id === pageId;
+    });
+    updatePageSelection();
+    updatePreviewMeta();
+    updateControls();
+  }
+
+  return editorPages.filter((item) => item.selected).map((item) => item.id);
+}
+
+function moveDraggedPages(targetPageId, placeAfterTarget) {
+  if (draggedPageIds.length === 0 || draggedPageIds.includes(targetPageId)) {
+    return;
+  }
+
+  const draggedIdSet = new Set(draggedPageIds);
+  const draggedPages = editorPages.filter((page) => draggedIdSet.has(page.id));
+  const remainingPages = editorPages.filter((page) => !draggedIdSet.has(page.id));
+  const targetIndex = remainingPages.findIndex((page) => page.id === targetPageId);
+
+  if (targetIndex === -1) {
+    return;
+  }
+
+  remainingPages.splice(targetIndex + (placeAfterTarget ? 1 : 0), 0, ...draggedPages);
+  editorPages = remainingPages;
+  renderEditor();
+}
+
 async function renderCanvasPage(page, canvas, scale) {
   const pdf = await getPreviewPdf(page.source);
   const pdfPage = await pdf.getPage(page.sourcePageNumber);
@@ -271,10 +287,41 @@ function createThumbnail(page, pageIndex) {
   const button = document.createElement("button");
   button.className = "thumbnail-card";
   button.type = "button";
+  button.draggable = true;
   button.dataset.pageId = page.id;
   button.setAttribute("aria-pressed", "false");
   button.setAttribute("aria-label", `Select final page ${pageIndex + 1}`);
   button.addEventListener("click", (event) => selectPage(page.id, event));
+  button.addEventListener("dragstart", (event) => {
+    draggedPageIds = getDragPageIds(page.id);
+    button.classList.add("is-dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", draggedPageIds.join(","));
+  });
+  button.addEventListener("dragend", () => {
+    draggedPageIds = [];
+    document.querySelectorAll(".thumbnail-card").forEach((element) => {
+      element.classList.remove("is-dragging", "is-drop-target");
+    });
+  });
+  button.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    if (!draggedPageIds.includes(page.id)) {
+      const placeAfterTarget = event.offsetY > button.offsetHeight / 2;
+      button.classList.add("is-drop-target");
+      button.classList.toggle("is-drop-after", placeAfterTarget);
+    }
+  });
+  button.addEventListener("dragleave", () => {
+    button.classList.remove("is-drop-target", "is-drop-after");
+  });
+  button.addEventListener("drop", (event) => {
+    event.preventDefault();
+    const placeAfterTarget = event.offsetY > button.offsetHeight / 2;
+    button.classList.remove("is-drop-target", "is-drop-after");
+    moveDraggedPages(page.id, placeAfterTarget);
+  });
 
   const canvas = document.createElement("canvas");
   const label = document.createElement("span");
@@ -429,7 +476,6 @@ dropZone.addEventListener("drop", (event) => {
   addFiles(event.dataTransfer.files);
 });
 
-addToEditorButton.addEventListener("click", addToEditor);
 rotatePageButton.addEventListener("click", rotateSelectedPages);
 excludePageButton.addEventListener("click", deleteSelectedPages);
 exportButton.addEventListener("click", exportFinalPdf);
