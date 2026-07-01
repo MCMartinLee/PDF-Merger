@@ -43,36 +43,35 @@
         <section class="preview-panel" aria-labelledby="preview-title">
           <div class="preview-header">
             <div>
-              <p class="eyebrow">Preview and basic edits</p>
-              <h2 id="preview-title">PDF Preview</h2>
+              <p class="eyebrow">Visual editor</p>
+              <h2 id="preview-title">PDF Pages</h2>
               <p id="previewMeta" class="preview-meta">Select a PDF to preview it.</p>
-            </div>
-            <div class="preview-controls" aria-label="Preview controls">
-              <button id="prevPageButton" class="icon-button" type="button" title="Previous page" aria-label="Previous page" disabled>
-                &lt;
-              </button>
-              <span id="pageIndicator" class="page-indicator">- / -</span>
-              <button id="nextPageButton" class="icon-button" type="button" title="Next page" aria-label="Next page" disabled>
-                &gt;
-              </button>
             </div>
           </div>
 
           <div class="edit-toolbar" aria-label="Basic PDF modifications">
             <button id="rotatePageButton" class="secondary-button" type="button" disabled>
-              Rotate page
+              Rotate selected
             </button>
             <button id="excludePageButton" class="secondary-button danger" type="button" disabled>
-              Exclude page
+              Delete selected
+            </button>
+            <button id="restorePageButton" class="secondary-button" type="button" disabled>
+              Undo delete
             </button>
             <button id="downloadEditedButton" class="secondary-button" type="button" disabled>
               Download edited PDF
             </button>
           </div>
 
-          <div class="canvas-shell">
-            <canvas id="pdfCanvas" aria-label="PDF page preview"></canvas>
-            <p id="emptyPreview" class="empty-preview">Your selected PDF will appear here.</p>
+          <div class="editor-shell">
+            <aside class="thumbnail-pane" aria-label="Page thumbnails">
+              <div id="thumbnailList" class="thumbnail-list"></div>
+            </aside>
+            <div class="document-pane" aria-label="PDF document preview">
+              <div id="documentPages" class="document-pages"></div>
+              <p id="emptyPreview" class="empty-preview">Your selected PDF will appear here.</p>
+            </div>
           </div>
         </section>
       </section>

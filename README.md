@@ -1,6 +1,6 @@
 # PDF Merger
 
-A simple static web app for previewing, lightly editing, and combining PDF files directly in the browser. Users can select or drag and drop PDF files, reorder them, preview pages, rotate or exclude individual pages, download an edited single PDF, merge files, and download the result as `combined.pdf`.
+A simple static web app for previewing, lightly editing, and combining PDF files directly in the browser. Users can select or drag and drop PDF files, reorder them, scroll through a full-document preview, select pages from thumbnail previews, rotate or delete selected pages, undo deleted pages, download an edited single PDF, merge files, and download the result as `combined.pdf`.
 
 The app uses [`pdf-lib`](https://pdf-lib.js.org/) for editing/merging and [`PDF.js`](https://mozilla.github.io/pdf.js/) for browser-side preview rendering from CDNs:
 

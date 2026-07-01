@@ -4,20 +4,17 @@ const fileList = document.querySelector("#fileList");
 const mergeButton = document.querySelector("#mergeButton");
 const statusMessage = document.querySelector("#statusMessage");
 const previewMeta = document.querySelector("#previewMeta");
-const pageIndicator = document.querySelector("#pageIndicator");
-const prevPageButton = document.querySelector("#prevPageButton");
-const nextPageButton = document.querySelector("#nextPageButton");
 const rotatePageButton = document.querySelector("#rotatePageButton");
 const excludePageButton = document.querySelector("#excludePageButton");
+const restorePageButton = document.querySelector("#restorePageButton");
 const downloadEditedButton = document.querySelector("#downloadEditedButton");
-const pdfCanvas = document.querySelector("#pdfCanvas");
+const thumbnailList = document.querySelector("#thumbnailList");
+const documentPages = document.querySelector("#documentPages");
 const emptyPreview = document.querySelector("#emptyPreview");
 
 let selectedFiles = [];
 let activeFileId = null;
-let activePage = 1;
 let activePdf = null;
-let renderTask = null;
 let renderToken = 0;
 
 if (window.pdfjsLib) {
@@ -68,6 +65,14 @@ function getPageRotation(entry, pageNumber) {
 
 function isPageExcluded(entry, pageNumber) {
   return entry.excludedPages.includes(pageNumber);
+}
+
+function getSelectedPages(entry) {
+  return [...entry.selectedPages].sort((a, b) => a - b);
+}
+
+function hasSelectedPages(entry) {
+  return Boolean(entry && entry.selectedPages.size > 0);
 }
 
 function createActionButton(label, title, onClick) {
@@ -125,10 +130,50 @@ function renderFileList() {
   if (selectedFiles.length === 0) {
     setStatus("No files selected.");
   } else if (selectedFiles.length === 1) {
-    setStatus("Select at least 2 PDFs to merge.");
+    setStatus("Select at least 2 PDFs to merge, or edit/download this one.");
   } else {
     setStatus(`${selectedFiles.length} PDFs ready to merge.`);
   }
+}
+
+function updateEditorControls() {
+  const entry = getActiveEntry();
+  const hasSelection = hasSelectedPages(entry);
+  const hasPdf = Boolean(entry && activePdf);
+
+  rotatePageButton.disabled = !hasSelection;
+  excludePageButton.disabled = !hasSelection;
+  restorePageButton.disabled = !entry || entry.excludedPages.length === 0;
+  downloadEditedButton.disabled = !hasPdf;
+}
+
+function updatePreviewMeta() {
+  const entry = getActiveEntry();
+
+  if (!entry || !activePdf) {
+    previewMeta.textContent = "Select a PDF to preview it.";
+    return;
+  }
+
+  const selectedCount = entry.selectedPages.size;
+  const excludedCount = entry.excludedPages.length;
+  const selectedText = selectedCount === 1 ? "1 page selected" : `${selectedCount} pages selected`;
+  const visibleCount = activePdf.numPages - excludedCount;
+  const removedText = excludedCount === 1 ? "1 page deleted" : `${excludedCount} pages deleted`;
+  previewMeta.textContent = `${entry.file.name} - ${visibleCount} visible pages. ${selectedText}. ${removedText}.`;
+}
+
+function downloadBlob(blob, filename) {
+  const downloadUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = downloadUrl;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+
+  URL.revokeObjectURL(downloadUrl);
 }
 
 function addFiles(files) {
@@ -141,15 +186,16 @@ function addFiles(files) {
     file,
     excludedPages: [],
     rotations: {},
+    selectedPages: new Set(),
   }));
 
   selectedFiles = [...selectedFiles, ...entries];
   if (!activeFileId && entries.length > 0) {
     activeFileId = entries[0].id;
-    activePage = 1;
   }
+
   renderFileList();
-  renderPreview();
+  renderEditor();
 
   if (invalidFiles.length > 0) {
     setStatus("Only .pdf files can be added.", true);
@@ -172,147 +218,249 @@ function removeFile(index) {
   const [removed] = selectedFiles.splice(index, 1);
   if (removed.id === activeFileId) {
     activeFileId = selectedFiles[0]?.id || null;
-    activePage = 1;
   }
+
   renderFileList();
-  renderPreview();
+  renderEditor();
 }
 
 function selectActiveFile(id) {
   activeFileId = id;
-  activePage = 1;
   renderFileList();
-  renderPreview();
+  renderEditor();
 }
 
-function updatePreviewControls(entry, pageCount) {
-  const hasPreview = Boolean(entry && pageCount > 0);
-  prevPageButton.disabled = !hasPreview || activePage <= 1;
-  nextPageButton.disabled = !hasPreview || activePage >= pageCount;
-  rotatePageButton.disabled = !hasPreview;
-  excludePageButton.disabled = !hasPreview;
-  downloadEditedButton.disabled = !hasPreview;
-  pageIndicator.textContent = hasPreview ? `${activePage} / ${pageCount}` : "- / -";
-
-  if (entry && hasPreview) {
-    const excluded = isPageExcluded(entry, activePage);
-    excludePageButton.textContent = excluded ? "Include page" : "Exclude page";
+function selectPage(entry, pageNumber, event) {
+  if (event.shiftKey) {
+    entry.selectedPages.add(pageNumber);
+  } else if (event.ctrlKey || event.metaKey) {
+    if (entry.selectedPages.has(pageNumber)) {
+      entry.selectedPages.delete(pageNumber);
+    } else {
+      entry.selectedPages.add(pageNumber);
+    }
   } else {
-    excludePageButton.textContent = "Exclude page";
+    entry.selectedPages.clear();
+    entry.selectedPages.add(pageNumber);
   }
+
+  updatePageSelection(entry);
+  updatePreviewMeta();
+  updateEditorControls();
+
+  document.querySelector(`[data-document-page="${pageNumber}"]`)?.scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
 }
 
-function downloadBlob(blob, filename) {
-  const downloadUrl = URL.createObjectURL(blob);
-  const link = document.createElement("a");
+function updatePageSelection(entry) {
+  document.querySelectorAll("[data-page-number]").forEach((element) => {
+    const pageNumber = Number(element.dataset.pageNumber);
+    const selected = entry.selectedPages.has(pageNumber);
 
-  link.href = downloadUrl;
-  link.download = filename;
-  document.body.append(link);
-  link.click();
-  link.remove();
-
-  URL.revokeObjectURL(downloadUrl);
+    element.classList.toggle("is-selected", selected);
+    element.setAttribute("aria-pressed", selected ? "true" : "false");
+  });
 }
 
-async function renderPreview() {
+async function renderCanvasPage(pdf, pageNumber, canvas, scale, rotation) {
+  const page = await pdf.getPage(pageNumber);
+  const viewport = page.getViewport({ scale, rotation });
+  const context = canvas.getContext("2d");
+
+  canvas.width = Math.floor(viewport.width);
+  canvas.height = Math.floor(viewport.height);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+
+  await page.render({ canvasContext: context, viewport }).promise;
+}
+
+function createThumbnail(entry, pageNumber) {
+  const button = document.createElement("button");
+  button.className = "thumbnail-card";
+  button.type = "button";
+  button.dataset.pageNumber = pageNumber;
+  button.setAttribute("aria-pressed", "false");
+  button.setAttribute("aria-label", `Select page ${pageNumber}`);
+  button.addEventListener("click", (event) => selectPage(entry, pageNumber, event));
+
+  const canvas = document.createElement("canvas");
+  const label = document.createElement("span");
+  label.className = "thumbnail-label";
+  label.textContent = `Page ${pageNumber}`;
+
+  button.append(canvas, label);
+  return { button, canvas };
+}
+
+function createDocumentPage(pageNumber) {
+  const wrapper = document.createElement("article");
+  wrapper.className = "document-page";
+  wrapper.dataset.documentPage = pageNumber;
+
+  const label = document.createElement("p");
+  label.className = "document-page-label";
+  label.textContent = `Page ${pageNumber}`;
+
+  const canvas = document.createElement("canvas");
+
+  wrapper.append(label, canvas);
+  return { wrapper, canvas };
+}
+
+async function renderEditor() {
   const entry = getActiveEntry();
   const token = (renderToken += 1);
 
-  if (renderTask) {
-    renderTask.cancel();
-    renderTask = null;
-  }
+  thumbnailList.innerHTML = "";
+  documentPages.innerHTML = "";
+  activePdf = null;
+  updateEditorControls();
 
   if (!entry || !window.pdfjsLib) {
-    activePdf = null;
-    pdfCanvas.hidden = true;
     emptyPreview.hidden = false;
     previewMeta.textContent = "Select a PDF to preview it.";
-    updatePreviewControls(null, 0);
     return;
   }
 
   try {
+    emptyPreview.hidden = true;
     previewMeta.textContent = `Loading ${entry.file.name}...`;
+
     const arrayBuffer = await entry.file.arrayBuffer();
-    const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-    const pdf = await loadingTask.promise;
+    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
     if (token !== renderToken) {
       return;
     }
 
     activePdf = pdf;
-    activePage = Math.min(Math.max(activePage, 1), pdf.numPages);
-    const page = await pdf.getPage(activePage);
-    const rotation = getPageRotation(entry, activePage);
-    const viewport = page.getViewport({ scale: 1.35, rotation });
-    const context = pdfCanvas.getContext("2d");
 
-    pdfCanvas.width = Math.floor(viewport.width);
-    pdfCanvas.height = Math.floor(viewport.height);
-    pdfCanvas.hidden = false;
-    emptyPreview.hidden = true;
-    context.clearRect(0, 0, pdfCanvas.width, pdfCanvas.height);
+    const visiblePages = [];
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      if (!isPageExcluded(entry, pageNumber)) {
+        visiblePages.push(pageNumber);
+      }
+    }
 
-    renderTask = page.render({ canvasContext: context, viewport });
-    await renderTask.promise;
-    renderTask = null;
+    entry.selectedPages.forEach((pageNumber) => {
+      if (!visiblePages.includes(pageNumber)) {
+        entry.selectedPages.delete(pageNumber);
+      }
+    });
+
+    if (entry.selectedPages.size === 0 && visiblePages.length > 0) {
+      entry.selectedPages.add(visiblePages[0]);
+    }
+
+    emptyPreview.hidden = visiblePages.length > 0;
+    if (visiblePages.length === 0) {
+      emptyPreview.textContent = "All pages are deleted. Use Undo delete to bring them back.";
+    } else {
+      emptyPreview.textContent = "Your selected PDF will appear here.";
+    }
+
+    const renderJobs = [];
+
+    visiblePages.forEach((pageNumber) => {
+      const rotation = getPageRotation(entry, pageNumber);
+      const thumbnail = createThumbnail(entry, pageNumber);
+      const documentPage = createDocumentPage(pageNumber);
+
+      thumbnailList.append(thumbnail.button);
+      documentPages.append(documentPage.wrapper);
+
+      renderJobs.push(renderCanvasPage(pdf, pageNumber, thumbnail.canvas, 0.22, rotation));
+      renderJobs.push(renderCanvasPage(pdf, pageNumber, documentPage.canvas, 1.15, rotation));
+    });
+
+    updatePageSelection(entry);
+    updatePreviewMeta();
+    updateEditorControls();
+
+    await Promise.all(renderJobs);
 
     if (token !== renderToken) {
       return;
     }
 
-    const excludedText = isPageExcluded(entry, activePage) ? " This page is excluded from the merge." : "";
-    previewMeta.textContent = `${entry.file.name}.${excludedText}`;
-    updatePreviewControls(entry, pdf.numPages);
+    updatePageSelection(entry);
   } catch (error) {
-    if (error?.name === "RenderingCancelledException") {
+    if (token !== renderToken) {
       return;
     }
 
     activePdf = null;
-    pdfCanvas.hidden = true;
+    thumbnailList.innerHTML = "";
+    documentPages.innerHTML = "";
     emptyPreview.hidden = false;
     previewMeta.textContent = "Could not preview this PDF.";
-    updatePreviewControls(entry, 0);
+    updateEditorControls();
   }
 }
 
-function goToPage(direction) {
-  if (!activePdf) {
-    return;
-  }
-
-  activePage = Math.min(Math.max(activePage + direction, 1), activePdf.numPages);
-  renderPreview();
-}
-
-function rotateActivePage() {
+function rotateSelectedPages() {
   const entry = getActiveEntry();
-  if (!entry) {
+  if (!hasSelectedPages(entry)) {
     return;
   }
 
-  const key = pageKey(activePage);
-  entry.rotations[key] = (getPageRotation(entry, activePage) + 90) % 360;
-  renderPreview();
+  getSelectedPages(entry).forEach((pageNumber) => {
+    const key = pageKey(pageNumber);
+    entry.rotations[key] = (getPageRotation(entry, pageNumber) + 90) % 360;
+  });
+
+  renderEditor();
 }
 
-function toggleExcludeActivePage() {
+function excludeSelectedPages() {
   const entry = getActiveEntry();
-  if (!entry) {
+  if (!hasSelectedPages(entry)) {
     return;
   }
 
-  if (isPageExcluded(entry, activePage)) {
-    entry.excludedPages = entry.excludedPages.filter((pageNumber) => pageNumber !== activePage);
-  } else {
-    entry.excludedPages = [...entry.excludedPages, activePage].sort((a, b) => a - b);
+  entry.excludedPages = [...new Set([...entry.excludedPages, ...getSelectedPages(entry)])].sort((a, b) => a - b);
+  entry.selectedPages.clear();
+  renderEditor();
+}
+
+function restoreDeletedPages() {
+  const entry = getActiveEntry();
+  if (!entry || entry.excludedPages.length === 0) {
+    return;
   }
 
-  renderPreview();
+  entry.excludedPages = [];
+  renderEditor();
+}
+
+function getIncludedPageIndices(sourcePdf, entry) {
+  return sourcePdf
+    .getPageIndices()
+    .filter((pageIndex) => !isPageExcluded(entry, pageIndex + 1));
+}
+
+async function copyEditedPages(sourcePdf, outputPdf, entry) {
+  const includedPageIndices = getIncludedPageIndices(sourcePdf, entry);
+
+  if (includedPageIndices.length === 0) {
+    return 0;
+  }
+
+  const copiedPages = await outputPdf.copyPages(sourcePdf, includedPageIndices);
+  copiedPages.forEach((page, copiedIndex) => {
+    const sourcePageNumber = includedPageIndices[copiedIndex] + 1;
+    const rotation = getPageRotation(entry, sourcePageNumber);
+
+    if (rotation > 0) {
+      page.setRotation(PDFLib.degrees(rotation));
+    }
+
+    outputPdf.addPage(page);
+  });
+
+  return copiedPages.length;
 }
 
 async function mergePdfs() {
@@ -327,39 +475,19 @@ async function mergePdfs() {
     const mergedPdf = await PDFLib.PDFDocument.create();
 
     for (const entry of selectedFiles) {
-      const file = entry.file;
       let sourcePdf;
 
       try {
-        const arrayBuffer = await file.arrayBuffer();
-        sourcePdf = await PDFLib.PDFDocument.load(arrayBuffer);
+        sourcePdf = await PDFLib.PDFDocument.load(await entry.file.arrayBuffer());
       } catch (error) {
-        throw new Error(`"${file.name}" is not a valid PDF.`);
+        throw new Error(`"${entry.file.name}" is not a valid PDF.`);
       }
 
-      const includedPageIndices = sourcePdf
-        .getPageIndices()
-        .filter((pageIndex) => !isPageExcluded(entry, pageIndex + 1));
-
-      if (includedPageIndices.length === 0) {
-        continue;
-      }
-
-      const copiedPages = await mergedPdf.copyPages(sourcePdf, includedPageIndices);
-      copiedPages.forEach((page, copiedIndex) => {
-        const sourcePageNumber = includedPageIndices[copiedIndex] + 1;
-        const rotation = getPageRotation(entry, sourcePageNumber);
-
-        if (rotation > 0) {
-          page.setRotation(PDFLib.degrees(rotation));
-        }
-
-        mergedPdf.addPage(page);
-      });
+      await copyEditedPages(sourcePdf, mergedPdf, entry);
     }
 
     if (mergedPdf.getPageCount() === 0) {
-      throw new Error("Every page is excluded. Include at least one page before merging.");
+      throw new Error("Every page is deleted. Restore at least one page before merging.");
     }
 
     const mergedBytes = await mergedPdf.save();
@@ -385,25 +513,11 @@ async function downloadEditedPdf() {
   try {
     const sourcePdf = await PDFLib.PDFDocument.load(await entry.file.arrayBuffer());
     const outputPdf = await PDFLib.PDFDocument.create();
-    const includedPageIndices = sourcePdf
-      .getPageIndices()
-      .filter((pageIndex) => !isPageExcluded(entry, pageIndex + 1));
+    await copyEditedPages(sourcePdf, outputPdf, entry);
 
-    if (includedPageIndices.length === 0) {
-      throw new Error("Every page is excluded. Include at least one page before downloading.");
+    if (outputPdf.getPageCount() === 0) {
+      throw new Error("Every page is deleted. Restore at least one page before downloading.");
     }
-
-    const copiedPages = await outputPdf.copyPages(sourcePdf, includedPageIndices);
-    copiedPages.forEach((page, copiedIndex) => {
-      const sourcePageNumber = includedPageIndices[copiedIndex] + 1;
-      const rotation = getPageRotation(entry, sourcePageNumber);
-
-      if (rotation > 0) {
-        page.setRotation(PDFLib.degrees(rotation));
-      }
-
-      outputPdf.addPage(page);
-    });
 
     const editedBytes = await outputPdf.save();
     const blob = new Blob([editedBytes], { type: "application/pdf" });
@@ -413,7 +527,7 @@ async function downloadEditedPdf() {
   } catch (error) {
     setStatus(error.message || "Something went wrong while editing this PDF.", true);
   } finally {
-    updatePreviewControls(entry, activePdf?.numPages || 0);
+    updateEditorControls();
   }
 }
 
@@ -438,11 +552,10 @@ dropZone.addEventListener("drop", (event) => {
 });
 
 mergeButton.addEventListener("click", mergePdfs);
-prevPageButton.addEventListener("click", () => goToPage(-1));
-nextPageButton.addEventListener("click", () => goToPage(1));
-rotatePageButton.addEventListener("click", rotateActivePage);
-excludePageButton.addEventListener("click", toggleExcludeActivePage);
+rotatePageButton.addEventListener("click", rotateSelectedPages);
+excludePageButton.addEventListener("click", excludeSelectedPages);
+restorePageButton.addEventListener("click", restoreDeletedPages);
 downloadEditedButton.addEventListener("click", downloadEditedPdf);
 
 renderFileList();
-renderPreview();
+renderEditor();
